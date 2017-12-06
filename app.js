@@ -2,6 +2,8 @@ var express = require('express');
 var app = express();
 var _ = require('underscore');
 var db = require('./db.js');
+var bcrypt = require('bcrypt');
+var middleware = require('./middleware')(db);
 
 var bodyParser = require('body-parser');
 var todos = [];
@@ -16,9 +18,11 @@ app.get('/' , function(req , res){
 });
 
 // Array of Todo
-app.get('/todos', function(req , res){
+app.get('/todos', middleware.requireAuthentication, function(req , res){
     var querParams = req.query;
-    var where = {};
+    var where = {
+        userId: req.user.get('id')
+    };
 
     if(querParams.hasOwnProperty('completed') && querParams.completed === "true"){
             where.completed = true;
@@ -42,9 +46,14 @@ app.get('/todos', function(req , res){
 
 
 // todo by it's id
-app.get('/todo/:id', function(req , res){
+app.get('/todo/:id', middleware.requireAuthentication, function(req , res){
     var todoId = parseInt(req.params.id, 10);
-    db.todo.findById(todoId).then(function(todo){
+    db.todo.findOne({
+        where: {
+            id: todoId,
+            userId: req.user.get('id')
+        }
+    }).then(function(todo){
         if(!!todo){
             res.json(todo.toJSON());
         }else{
@@ -56,11 +65,15 @@ app.get('/todo/:id', function(req , res){
 });
 
 // Create Todo
-app.post('/todos', function(req , res){
+app.post('/todos', middleware.requireAuthentication, function(req , res){
     var body = _.pick(req.body , 'description' , 'completed');
 
     db.todo.create(body).then(function (todo){
-        res.json(todo.toJSON());
+        req.user.addTodo(todo).then(function(){
+            return todo.reload();
+        }).then(function(todo){
+            res.json(todo.toJSON());
+        });
     }, function(e){
         res.status(400).json(e);
     });
@@ -68,12 +81,13 @@ app.post('/todos', function(req , res){
 
 
 // delete Todo
-app.delete('/todos/:id' , function(req , res){
+app.delete('/todos/:id', middleware.requireAuthentication , function(req , res){
     var todoId = parseInt(req.params.id, 10);
 
     db.todo.destroy({
         where: {
-            id: todoId
+            id: todoId,
+            userId: req.user.get('id')
         }
     }).then(function (rowsDeleted){
         if(rowsDeleted === 0){
@@ -90,7 +104,7 @@ app.delete('/todos/:id' , function(req , res){
 
 
 // Update Todo
-app.put('/todos/:id', function (req, res) {
+app.put('/todos/:id', middleware.requireAuthentication, function (req, res) {
 	var todoId = parseInt(req.params.id, 10);
 	var body = _.pick(req.body, 'description', 'completed');
     var attributes = {};
@@ -103,7 +117,10 @@ app.put('/todos/:id', function (req, res) {
 		attributes.description = body.description;
 	}
 
-	db.todo.findById(todoId).then(function(todo) {
+	db.todo.findOne({
+        id: todoId,
+        userId: req.user.get('id')
+    }).then(function(todo) {
 		if (todo) {
 			todo.update(attributes).then(function(todo) {
 				res.json(todo.toJSON());
@@ -118,7 +135,52 @@ app.put('/todos/:id', function (req, res) {
 	});
 });
 
-db.sequelize.sync().then(function(){
+// user
+app.post('/users', function (req, res) {
+	var body = _.pick(req.body, 'email', 'password');
+
+	db.user.create(body).then(function (user) {
+		res.json(user.toSignJSON());
+	}, function (e) {
+		res.status(400).json(e);
+	});
+});
+
+
+
+//login
+app.post('/users/login', function(req , res) {
+    var body = _.pick(req.body, 'email', 'password');
+    var userInstance;
+
+    db.user.authenticate(body).then(function (user) {
+        var token = user.generateToken('authentication');
+        userInstance = user;
+        user.token= token;
+
+        return db.token.create({
+            token: token
+        });
+	}).then(function (tokenInstance){
+        res.header('token', tokenInstance.get('token')).json(userInstance.toPublicJSON());
+    }).catch(function () {
+		res.status(401).send();
+	});
+});
+
+// DELETE /users/login
+app.delete('/users/login', middleware.requireAuthentication, function (req, res) {
+	req.token.destroy().then(function () {
+		res.status(204).send();
+	}).catch(function () {
+		res.status(500).send();
+	});
+});
+
+
+db.sequelize.sync(
+    // {force: true}
+).then(function(){
     app.listen(PORT , function(){
         console.log('listning port' + PORT + '!');
     });
